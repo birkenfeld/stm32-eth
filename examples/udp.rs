@@ -14,10 +14,11 @@ use core::cell::RefCell;
 use cortex_m::interrupt::Mutex;
 
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr};
-use smoltcp::iface::{NeighborCache, EthernetInterfaceBuilder};
-use smoltcp::socket::{SocketSet, UdpSocket, UdpSocketBuffer};
+use smoltcp::wire::{EthernetAddress, Ipv4Address, IpCidr};
+use smoltcp::iface::{NeighborCache, EthernetInterfaceBuilder, Routes};
+use smoltcp::socket::{SocketSet, UdpSocket, UdpSocketBuffer, RawSocketBuffer};
 use smoltcp::storage::PacketMetadata;
+use smoltcp::dhcp::Dhcpv4Client;
 use log::{Record, Level, Metadata, LevelFilter, info, warn};
 
 use stm32_eth::{Eth, RingEntry};
@@ -113,10 +114,6 @@ fn main() -> ! {
     p.RCC.ahb2enr.modify(|_, w| w.rngen().set_bit());
     p.RNG.cr.modify(|_, w| w.rngen().set_bit());
 
-    let ip_addr = IpCidr::new(IpAddress::v4(10, 0, 0, 1), 24);
-    let mut ip_addrs = [ip_addr];
-    let mut neighbor_storage = [None; 16];
-    let neighbor_cache = NeighborCache::new(&mut neighbor_storage[..]);
     let serial: u32 = unsafe {
         *(0x1FFF_7A10 as *const u32) ^
         *(0x1FFF_7A14 as *const u32) ^
@@ -126,44 +123,56 @@ fn main() -> ! {
         0x46, 0x52, 0x4d,  // F R M
         (serial >> 16) as u8, (serial >> 8) as u8, serial as u8
     ]);
+    let mut ip_addrs = [IpCidr::new(Ipv4Address::UNSPECIFIED.into(), 0)];
+    let mut neighbor_storage = [None; 16];
+    let mut routes_storage = [None; 2];
     let mut iface = EthernetInterfaceBuilder::new(&mut eth)
         .ethernet_addr(ethernet_addr)
         .ip_addrs(&mut ip_addrs[..])
-        .neighbor_cache(neighbor_cache)
+        .neighbor_cache(NeighborCache::new(&mut neighbor_storage[..]))
+        .routes(Routes::new(&mut routes_storage[..]))
         .finalize();
 
-    let mut rx_meta_buffer = [PacketMetadata::EMPTY; 4];
-    let mut tx_meta_buffer = [PacketMetadata::EMPTY; 4];
-    let mut rx_data_buffer = [0; 1500*4];
-    let mut tx_data_buffer = [0; 1500*4];
-    let mut udp_socket = UdpSocket::new(
-        UdpSocketBuffer::new(&mut rx_meta_buffer[..], &mut rx_data_buffer[..]),
-        UdpSocketBuffer::new(&mut tx_meta_buffer[..], &mut tx_data_buffer[..])
+    let mut udp_rx_meta_buffer = [PacketMetadata::EMPTY; 4];
+    let mut udp_tx_meta_buffer = [PacketMetadata::EMPTY; 4];
+    let mut udp_rx_data_buffer = [0; 1500*4];
+    let mut udp_tx_data_buffer = [0; 1500*4];
+    let mut dhcp_rx_meta_buffer = [PacketMetadata::EMPTY; 1];
+    let mut dhcp_tx_meta_buffer = [PacketMetadata::EMPTY; 1];
+    let mut dhcp_rx_data_buffer = [0; 1500];
+    let mut dhcp_tx_data_buffer = [0; 1500*2];
+
+    let udp_socket = UdpSocket::new(
+        UdpSocketBuffer::new(&mut udp_rx_meta_buffer[..], &mut udp_rx_data_buffer[..]),
+        UdpSocketBuffer::new(&mut udp_tx_meta_buffer[..], &mut udp_tx_data_buffer[..])
     );
-    udp_socket.bind((IpAddress::v4(10, 0, 0, 1), 50000)).unwrap();
     let mut sockets_storage = [None, None];
     let mut sockets = SocketSet::new(&mut sockets_storage[..]);
-    let handle = sockets.add(udp_socket);
     let mut target = None;
 
-    info!("------------------------------------------------------------------------");
+    let dhcp_rx_buffer = RawSocketBuffer::new(&mut dhcp_rx_meta_buffer[..], &mut dhcp_rx_data_buffer[..]);
+    let dhcp_tx_buffer = RawSocketBuffer::new(&mut dhcp_tx_meta_buffer[..], &mut dhcp_tx_data_buffer[..]);
+    let mut dhcp = Dhcpv4Client::new(&mut sockets, dhcp_rx_buffer, dhcp_tx_buffer, Instant::from_millis(0));
+
+    let udp_handle = sockets.add(udp_socket);
     let mut seq_number = 0u32;
+    let mut dhcp_msgs = 0;
+
+    info!("------------------------------------------------------------------------");
     loop {
         //let random = p.RNG.dr.read().bits();
         {
-            let mut socket = sockets.get::<UdpSocket>(handle);
-            // if socket.can_recv() {
-                while let Ok((msg, ep)) = socket.recv() {
-                    if msg == b"start" {
-                        info!("got start message");
-                        target = Some(ep);
-                        seq_number = 0;
-                    } else if msg == b"stop " {
-                        info!("got stop message");
-                        target = None;
-                    }
+            let mut socket = sockets.get::<UdpSocket>(udp_handle);
+            while let Ok((msg, ep)) = socket.recv() {
+                if msg == b"start" {
+                    info!("got start message");
+                    target = Some(ep);
+                    seq_number = 0;
+                } else if msg == b"stop " {
+                    info!("got stop message");
+                    target = None;
                 }
-            // }
+            }
             if let Some(tgt) = target {
                 while let Ok(buf) = socket.send(1400, tgt) {
                     buf[0] = (seq_number >> 24) as u8;
@@ -174,9 +183,25 @@ fn main() -> ! {
                 }
             }
         }
-        let time = interrupt::free(|cs| *TIME.borrow(cs).borrow());
-        if let Err(e) = iface.poll(&mut sockets, Instant::from_millis(time as i64)) {
-            warn!("{}", e);
+        let time = Instant::from_millis(interrupt::free(|cs| *TIME.borrow(cs).borrow() as i64));
+        if let Err(e) = iface.poll(&mut sockets, time) {
+            warn!("poll: {}", e);
+        }
+        if dhcp_msgs < 2 {
+            match dhcp.poll(&mut iface, &mut sockets, time) {
+                Err(e) => warn!("dhcp: {}", e),
+                Ok(Some(config)) => match config.address {
+                    Some(cidr) => {
+                        info!("got {}", cidr);
+                        dhcp_msgs += 1;
+                        iface.update_ip_addrs(
+                            |addrs| addrs.iter_mut().for_each(|addr| *addr = IpCidr::Ipv4(cidr)));
+                        let _ = sockets.get::<UdpSocket>(udp_handle).bind((cidr.address(), 50000));
+                    }
+                    _ => {}
+                },
+                _ => ()
+            }
         }
     }
 }
