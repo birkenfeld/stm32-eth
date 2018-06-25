@@ -43,10 +43,6 @@ name = "pktgen"
 name = "ip"
 required-features = ["smoltcp-phy"]
 
-[[example]]
-name = "udp"
-required-features = ["smoltcp-phy"]
-
 [profile.release]
 debug = 2
 lto = true
