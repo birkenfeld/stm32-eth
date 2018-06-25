@@ -1,16 +1,17 @@
 #![no_std]
 #![no_main]
+#![feature(cell_update)]
 
 extern crate panic_itm;
 
-use cortex_m::{iprintln, interrupt};
+use cortex_m::{iprintln, interrupt, peripheral};
 use cortex_m_rt::{entry, exception};
 use stm32f4xx_hal::{
     gpio::GpioExt,
     stm32::{Peripherals, CorePeripherals, SYST},
 };
 
-use core::cell::RefCell;
+use core::cell::Cell;
 use cortex_m::interrupt::Mutex;
 
 use smoltcp::time::Instant;
@@ -23,8 +24,6 @@ use log::{Record, Level, Metadata, LevelFilter, info, warn};
 
 use stm32_eth::{Eth, RingEntry};
 
-static mut LOGGER: ItmLogger = ItmLogger;
-
 struct ItmLogger;
 
 impl log::Log for ItmLogger {
@@ -34,63 +33,26 @@ impl log::Log for ItmLogger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            let mut cp = unsafe { CorePeripherals::steal() };
-            iprintln!(&mut cp.ITM.stim[0], "[{}] {}", record.level(), record.args());
+            let stim = unsafe { &mut (*peripheral::ITM::ptr()).stim[0] };
+            iprintln!(stim, "[{}] {}", record.level(), record.args());
         }
     }
 
     fn flush(&self) {}
 }
 
-static TIME: Mutex<RefCell<u64>> = Mutex::new(RefCell::new(0));
-
-/* *** MINE ***
-pub fn setup(p: &Peripherals) {
-    let pll_n_bits = 336;
-    let hpre_bits = 0b111;
-    let ppre2_bits = 0b100;
-    let ppre1_bits = 0b101;
-
-    // adjust flash wait states
-    p.FLASH.acr.modify(|_, w| unsafe { w.latency().bits(0b110) });
-
-    // use PLL as source
-    p.RCC.pllcfgr.modify(|_, w| unsafe { w.plln().bits(pll_n_bits as u16) });
-
-    // Enable PLL
-    p.RCC.cr.modify(|_, w| w.pllon().set_bit());
-    // Wait for PLL ready
-    while p.RCC.cr.read().pllrdy().bit_is_clear() {}
-
-    // enable PLL
-    p.RCC.cfgr.write(|w| unsafe {
-                w
-                    // APB high-speed prescaler (APB2)
-                    .ppre2()
-                    .bits(ppre2_bits)
-                    // APB Low speed prescaler (APB1)
-                    .ppre1()
-                    .bits(ppre1_bits)
-                    // AHB prescaler
-                    .hpre()
-                    .bits(hpre_bits)
-                    // System clock switch
-                    // PLL selected as system clock
-                    .sw1().bit(true)
-                    .sw0().bit(false)
-            });
-
-    init_pins(&p.RCC, &p.GPIOA, &p.GPIOB, &p.GPIOC, &p.GPIOG);
-*/
+static LOGGER: ItmLogger = ItmLogger;
+static ETH_TIME: Mutex<Cell<i64>> = Mutex::new(Cell::new(0));
 
 #[entry]
 fn main() -> ! {
-    unsafe { log::set_logger(&LOGGER).unwrap(); }
-    log::set_max_level(LevelFilter::Debug);
+    log::set_logger(&LOGGER).unwrap();
+    log::set_max_level(LevelFilter::Info);
 
     let p = Peripherals::take().unwrap();
     let mut cp = CorePeripherals::take().unwrap();
 
+    setup_clock(&p);
     setup_systick(&mut cp.SYST);
 
     stm32_eth::setup(&p.RCC, &p.SYSCFG);
@@ -110,15 +72,7 @@ fn main() -> ! {
         &mut rx_ring[..], &mut tx_ring[..]
     );
 
-    // enable RNG
-    p.RCC.ahb2enr.modify(|_, w| w.rngen().set_bit());
-    p.RNG.cr.modify(|_, w| w.rngen().set_bit());
-
-    let serial: u32 = unsafe {
-        *(0x1FFF_7A10 as *const u32) ^
-        *(0x1FFF_7A14 as *const u32) ^
-        *(0x1FFF_7A18 as *const u32)
-    };
+    let serial = read_serno();
     let ethernet_addr = EthernetAddress([
         0x46, 0x52, 0x4d,  // F R M
         (serial >> 16) as u8, (serial >> 8) as u8, serial as u8
@@ -160,7 +114,6 @@ fn main() -> ! {
 
     info!("------------------------------------------------------------------------");
     loop {
-        //let random = p.RNG.dr.read().bits();
         {
             let mut socket = sockets.get::<UdpSocket>(udp_handle);
             while let Ok((msg, ep)) = socket.recv() {
@@ -183,7 +136,7 @@ fn main() -> ! {
                 }
             }
         }
-        let time = Instant::from_millis(interrupt::free(|cs| *TIME.borrow(cs).borrow() as i64));
+        let time = Instant::from_millis(interrupt::free(|cs| ETH_TIME.borrow(cs).get()));
         if let Err(e) = iface.poll(&mut sockets, time) {
             warn!("poll: {}", e);
         }
@@ -206,6 +159,45 @@ fn main() -> ! {
     }
 }
 
+fn read_serno() -> u32 {
+    unsafe {
+        *(0x1FFF_7A10 as *const u32) ^
+        *(0x1FFF_7A14 as *const u32) ^
+        *(0x1FFF_7A18 as *const u32)
+    }
+}
+
+fn setup_clock(p: &Peripherals) {
+    // setup for 168 MHz, 84 MHz, 42 MHz
+    let pll_n_bits = 336;
+    let hpre_bits = 0b111;
+    let ppre2_bits = 0b100;
+    let ppre1_bits = 0b101;
+
+    // adjust flash wait states
+    p.FLASH.acr.modify(|_, w| unsafe { w.latency().bits(0b110) });
+
+    // use PLL as source
+    p.RCC.pllcfgr.modify(|_, w| unsafe { w.plln().bits(pll_n_bits as u16) });
+
+    // enable PLL
+    p.RCC.cr.modify(|_, w| w.pllon().set_bit());
+    // wait for PLL ready
+    while p.RCC.cr.read().pllrdy().bit_is_clear() {}
+
+    // enable PLL
+    p.RCC.cfgr.write(|w| unsafe { w
+                                  // APB high-speed prescaler (APB2)
+                                  .ppre2().bits(ppre2_bits)
+                                  // APB Low speed prescaler (APB1)
+                                  .ppre1().bits(ppre1_bits)
+                                  // AHB prescaler
+                                  .hpre().bits(hpre_bits)
+                                  // System clock switch
+                                  // PLL selected as system clock
+                                  .sw().bits(0b10) });
+}
+
 fn setup_systick(syst: &mut SYST) {
     syst.set_reload(SYST::get_ticks_per_10ms() / 10);
     syst.enable_counter();
@@ -214,5 +206,5 @@ fn setup_systick(syst: &mut SYST) {
 
 #[exception]
 fn SysTick() {
-    cortex_m::interrupt::free(|cs| *TIME.borrow(cs).borrow_mut() += 1);
+    interrupt::free(|cs| ETH_TIME.borrow(cs).update(|v| v.wrapping_add(1)));
 }
