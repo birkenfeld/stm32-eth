@@ -20,6 +20,8 @@ features = [ "smoltcp-phy", "nucleo-f429zi" ]
 [dependencies]
 volatile-register = "0.2"
 aligned = "0.3"
+arrayvec = { version = "0.4", default-features = false }
+byteorder = { version = "1.2", default-features = false }
 stm32f4xx-hal = { version = "0.4", features = ["rt"] }
 cortex-m = "0.5"
 cortex-m-rt = "0.6"

@@ -1,35 +1,30 @@
-#![no_main]
 #![no_std]
+#![no_main]
 #![feature(cell_update)]
 
-#[macro_use]
-extern crate log;
-#[macro_use]
-extern crate cortex_m;
-#[macro_use]
-extern crate cortex_m_rt;
-extern crate stm32f429 as board;
-extern crate stm32_eth as eth;
 extern crate panic_itm;
-extern crate smoltcp;
-extern crate arrayvec;
-extern crate byteorder;
+
+use cortex_m::{iprintln, interrupt, peripheral};
+use cortex_m::interrupt::Mutex;
+use cortex_m_rt::{entry, exception};
+use stm32f4xx_hal::{
+    gpio::GpioExt,
+    stm32::{Peripherals, CorePeripherals, SYST, TIM2, RNG},
+};
 
 use core::cell::Cell;
 use arrayvec::ArrayVec;
 use byteorder::{ByteOrder, LE};
-use board::{Peripherals, CorePeripherals, SYST};
-use log::{Record, Level, Metadata, LevelFilter};
-use cortex_m::peripheral;
-use cortex_m::interrupt::{self, Mutex};
-use cortex_m_rt::ExceptionFrame;
+
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, IpEndpoint};
+use smoltcp::wire::{EthernetAddress, IpAddress, Ipv4Address, IpCidr, IpEndpoint};
 use smoltcp::iface::{NeighborCache, EthernetInterfaceBuilder, Routes};
 use smoltcp::socket::{SocketSet, UdpSocket, UdpSocketBuffer, RawSocketBuffer};
 use smoltcp::storage::PacketMetadata;
 use smoltcp::dhcp::Dhcpv4Client;
-use eth::{Eth, RingEntry};
+use log::{Record, Level, Metadata, LevelFilter, info, warn};
+
+use stm32_eth::{Eth, RingEntry};
 
 const PORT: u16 = 54321;
 
@@ -53,8 +48,7 @@ impl log::Log for ItmLogger {
 static LOGGER: ItmLogger = ItmLogger;
 static ETH_TIME: Mutex<Cell<i64>> = Mutex::new(Cell::new(0));
 
-entry!(main);
-
+#[entry]
 fn main() -> ! {
     log::set_logger(&LOGGER).unwrap();
     log::set_max_level(LevelFilter::Info);
@@ -66,7 +60,17 @@ fn main() -> ! {
     setup_systick(&mut cp.SYST);
     setup_rng(&p);
     setup_10mhz(&p);
-    eth::setup(&p);
+    stm32_eth::setup(&p.RCC, &p.SYSCFG);
+
+    stm32_eth::setup(&p.RCC, &p.SYSCFG);
+    let gpioa = p.GPIOA.split();
+    let gpiob = p.GPIOB.split();
+    let gpioc = p.GPIOC.split();
+    let gpiog = p.GPIOG.split();
+    stm32_eth::setup_pins(
+        gpioa.pa1, gpioa.pa2, gpioa.pa7, gpiob.pb13, gpioc.pc1,
+        gpioc.pc4, gpioc.pc5, gpiog.pg11, gpiog.pg13
+    );
 
     let mut rx_ring: [RingEntry<_>; 16] = Default::default();
     let mut tx_ring: [RingEntry<_>; 16] = Default::default();
@@ -80,7 +84,7 @@ fn main() -> ! {
         0x46, 0x52, 0x4d,  // F R M
         (serial >> 16) as u8, (serial >> 8) as u8, serial as u8
     ]);
-    let mut ip_addrs = [IpCidr::new(IpAddress::v4(0, 0, 0, 0), 0)];
+    let mut ip_addrs = [IpCidr::new(Ipv4Address::UNSPECIFIED.into(), 0)];
     let mut neighbor_storage = [None; 16];
     let mut routes_storage = [None; 2];
     let mut iface = EthernetInterfaceBuilder::new(&mut eth)
@@ -111,7 +115,7 @@ fn main() -> ! {
     let mut dhcp = Dhcpv4Client::new(&mut sockets, dhcp_rx_buffer, dhcp_tx_buffer, Instant::from_millis(0));
 
     let udp_handle = sockets.add(udp_socket);
-    let mut setup_done = false;
+    let mut dhcp_msgs = 0;
     let mut cmd_buf = [0; 128];
 
     let mut gen = Generator::new(p.TIM2);
@@ -132,14 +136,20 @@ fn main() -> ! {
             warn!("poll: {}", e);
         }
         // ethernet setup
-        if !setup_done {
-            let ip_addr = iface.ipv4_addr().unwrap();
-            if !ip_addr.is_unspecified() {
-                info!("dhcp done, binding to {}:{}", ip_addr, PORT);
-                sockets.get::<UdpSocket>(udp_handle).bind((ip_addr, PORT)).unwrap();
-                setup_done = true;
-            } else if let Err(e) = dhcp.poll(&mut iface, &mut sockets, time) {
-                warn!("dhcp: {}", e);
+        if dhcp_msgs < 2 {
+            match dhcp.poll(&mut iface, &mut sockets, time) {
+                Err(e) => warn!("dhcp: {}", e),
+                Ok(Some(config)) => match config.address {
+                    Some(cidr) => {
+                        info!("got {}", cidr);
+                        dhcp_msgs += 1;
+                        iface.update_ip_addrs(
+                            |addrs| addrs.iter_mut().for_each(|addr| *addr = IpCidr::Ipv4(cidr)));
+                        let _ = sockets.get::<UdpSocket>(udp_handle).bind((cidr.address(), 50000));
+                    }
+                    _ => {}
+                },
+                _ => ()
             }
         }
     }
@@ -147,7 +157,7 @@ fn main() -> ! {
 
 struct Generator {
     endpoint: IpEndpoint,
-    timer: board::TIM2,
+    timer: TIM2,
 
     mcpd_id: u8,
     run_id: u16,
@@ -161,7 +171,7 @@ struct Generator {
 }
 
 impl Generator {
-    fn new(timer: board::TIM2) -> Self {
+    fn new(timer: TIM2) -> Self {
         // default rate: 1000 events/sec
         Generator { timer, endpoint: (IpAddress::v4(0, 0, 0, 0), PORT).into(),
                     mcpd_id: 0, run_id: 0, interval: 10_000, minpkt: 10,
@@ -428,9 +438,8 @@ fn setup_clock(p: &Peripherals) {
                                   // AHB prescaler
                                   .hpre().bits(ahb_div)
                                   // PLL selected as system clock
-                                  .sw1().bit(true)
-                                  .sw0().bit(false) });
-    while p.RCC.cfgr.read().sws1().bit_is_clear() {}
+                                  .sw().bits(0b10) });
+    while p.RCC.cfgr.read().sws().bits() != 0b10 {}
 }
 
 fn setup_systick(syst: &mut SYST) {
@@ -460,24 +469,11 @@ fn read_serno() -> u32 {
 
 fn read_rand() -> u32 {
     unsafe {
-        (*board::RNG::ptr()).dr.read().bits()
+        (*RNG::ptr()).dr.read().bits()
     }
 }
 
-exception!(SysTick, systick);
-
-fn systick() {
+#[exception]
+fn SysTick() {
     interrupt::free(|cs| ETH_TIME.borrow(cs).update(|v| v.wrapping_add(1)));
-}
-
-exception!(HardFault, hard_fault);
-
-fn hard_fault(ef: &ExceptionFrame) -> ! {
-    panic!("HardFault at {:#?}", ef);
-}
-
-exception!(*, default_handler);
-
-fn default_handler(irqn: i16) {
-    panic!("Unhandled exception (IRQn = {})", irqn);
 }
