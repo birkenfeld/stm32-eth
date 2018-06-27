@@ -9,7 +9,7 @@ use cortex_m::interrupt::Mutex;
 use cortex_m_rt::{entry, exception};
 use stm32f4xx_hal::{
     gpio::GpioExt,
-    stm32::{Peripherals, CorePeripherals, SYST, TIM2, RNG},
+    stm32::{Peripherals, CorePeripherals, GPIOB, SYST, TIM2, RNG},
 };
 
 use core::cell::Cell;
@@ -17,7 +17,7 @@ use arrayvec::ArrayVec;
 use byteorder::{ByteOrder, LE};
 
 use smoltcp::time::Instant;
-use smoltcp::wire::{EthernetAddress, IpAddress, Ipv4Address, IpCidr, IpEndpoint};
+use smoltcp::wire::{EthernetAddress, IpAddress, IpCidr, IpEndpoint};
 use smoltcp::iface::{NeighborCache, EthernetInterfaceBuilder, Routes};
 use smoltcp::socket::{SocketSet, UdpSocket, UdpSocketBuffer, RawSocketBuffer};
 use smoltcp::storage::PacketMetadata;
@@ -60,6 +60,8 @@ fn main() -> ! {
     setup_systick(&mut cp.SYST);
     setup_rng(&p);
     setup_10mhz(&p);
+    setup_gpio(&p);
+    let use_dhcp = p.GPIOC.idr.read().idr13().bit_is_set();
     stm32_eth::setup(&p.RCC, &p.SYSCFG);
 
     stm32_eth::setup(&p.RCC, &p.SYSCFG);
@@ -71,6 +73,9 @@ fn main() -> ! {
         gpioa.pa1, gpioa.pa2, gpioa.pa7, gpiob.pb13, gpioc.pc1,
         gpioc.pc4, gpioc.pc5, gpiog.pg11, gpiog.pg13
     );
+
+    set_leds(true, false, false);
+
 
     let mut rx_ring: [RingEntry<_>; 16] = Default::default();
     let mut tx_ring: [RingEntry<_>; 16] = Default::default();
@@ -84,7 +89,11 @@ fn main() -> ! {
         0x46, 0x52, 0x4d,  // F R M
         (serial >> 16) as u8, (serial >> 8) as u8, serial as u8
     ]);
-    let mut ip_addrs = [IpCidr::new(Ipv4Address::UNSPECIFIED.into(), 0)];
+    let mut ip_addrs = if use_dhcp {
+        [IpCidr::new(IpAddress::v4(0, 0, 0, 0), 0)]
+    } else {
+        [IpCidr::new(IpAddress::v4(192, 168, 168, 121), 24)]
+    };
     let mut neighbor_storage = [None; 16];
     let mut routes_storage = [None; 2];
     let mut iface = EthernetInterfaceBuilder::new(&mut eth)
@@ -115,7 +124,7 @@ fn main() -> ! {
     let mut dhcp = Dhcpv4Client::new(&mut sockets, dhcp_rx_buffer, dhcp_tx_buffer, Instant::from_millis(0));
 
     let udp_handle = sockets.add(udp_socket);
-    let mut dhcp_msgs = 0;
+    let mut dhcp_msgs = if use_dhcp { 0 } else { 2 };
     let mut cmd_buf = [0; 128];
 
     let mut gen = Generator::new(p.TIM2);
@@ -375,6 +384,7 @@ impl Generator {
         self.run = true;
         self.overflow = 0;
         self.last = 0;
+        set_leds(false, true, true);
         // reset the timer
         self.timer.cnt.write(|w| unsafe { w.bits(0) });
         self.timer.cr1.write(|w| w.cen().set_bit());
@@ -383,6 +393,7 @@ impl Generator {
     fn stop(&mut self) {
         self.run = false;
         self.timer.cr1.write(|w| w.cen().clear_bit());
+        set_leds(false, true, false);
     }
 }
 
@@ -446,6 +457,19 @@ fn setup_systick(syst: &mut SYST) {
     syst.set_reload(SYST::get_ticks_per_10ms() / 10);
     syst.enable_counter();
     syst.enable_interrupt();
+}
+
+fn setup_gpio(p: &Peripherals) {
+    // Set up button and LEDs, clocks already enabled by ethernet
+    // TODO use HAL
+    p.GPIOC.moder.modify(|_, w| w.moder13().bits(0b00));
+    p.GPIOC.pupdr.modify(|_, w| unsafe { w.pupdr13().bits(0b10) });
+    p.GPIOB.moder.modify(|_, w| w.moder0().bits(0b01).moder7().bits(0b01).moder14().bits(0b01));
+}
+
+fn set_leds(red: bool, green: bool, blue: bool) {
+    let gpiob = unsafe { &(*GPIOB::ptr()) };
+    gpiob.odr.modify(|_, w| w.odr0().bit(green).odr7().bit(blue).odr14().bit(red));
 }
 
 fn setup_rng(p: &Peripherals) {
