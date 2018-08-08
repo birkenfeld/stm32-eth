@@ -20,24 +20,22 @@ use smoltcp::iface::{NeighborCache, EthernetInterfaceBuilder, Routes};
 use smoltcp::socket::{SocketSet, UdpSocket, UdpSocketBuffer, RawSocketBuffer};
 use smoltcp::storage::PacketMetadata;
 use smoltcp::dhcp::Dhcpv4Client;
-use log::{Record, Level, Metadata, LevelFilter, info, warn};
+use log::{Record, Metadata, LevelFilter, info, warn};
 
 use stm32_eth::{Eth, RingEntry};
 
 struct ItmLogger;
 
+fn itm() -> &'static mut peripheral::itm::Stim {
+    unsafe { &mut (*peripheral::ITM::ptr()).stim[0] }
+}
+
 impl log::Log for ItmLogger {
-    fn enabled(&self, metadata: &Metadata) -> bool {
-        metadata.level() <= Level::Trace
-    }
-
     fn log(&self, record: &Record) {
-        if self.enabled(record.metadata()) {
-            let stim = unsafe { &mut (*peripheral::ITM::ptr()).stim[0] };
-            iprintln!(stim, "[{}] {}", record.level(), record.args());
-        }
+        iprintln!(itm(), "[{}] {}", record.level(), record.args());
     }
 
+    fn enabled(&self, _: &Metadata) -> bool { true }
     fn flush(&self) {}
 }
 
@@ -46,8 +44,11 @@ static ETH_TIME: Mutex<Cell<i64>> = Mutex::new(Cell::new(0));
 
 #[entry]
 fn main() -> ! {
-    log::set_logger(&LOGGER).unwrap();
-    log::set_max_level(LevelFilter::Info);
+    // enable logging if someone is listening on ITM
+    if itm().is_fifo_ready() {
+        log::set_logger(&LOGGER).unwrap();
+        log::set_max_level(LevelFilter::Info);
+    }
 
     let p = Peripherals::take().unwrap();
     let mut cp = CorePeripherals::take().unwrap();
