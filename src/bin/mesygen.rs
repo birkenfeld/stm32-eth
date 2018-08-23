@@ -27,7 +27,7 @@ use log::{Record, Metadata, LevelFilter, info, warn};
 use stm32_eth::{Eth, RingEntry};
 
 const PORT: u16 = 54321;
-const MAX_PER_PKT: usize = 220;
+const MAX_PER_PKT: usize = 234;
 
 struct ItmLogger;
 
