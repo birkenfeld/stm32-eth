@@ -7,13 +7,12 @@ import threading
 try:
     addr = sys.argv[1]
     rate = int(sys.argv[2])
-    pktsize = int(sys.argv[3])
-    dt = float(sys.argv[4])
+    dt = float(sys.argv[3])
 except:
-    print 'usage: mesytest.py ipaddr rate minperpacket meastime'
+    print 'usage: mesytest.py ipaddr rate meastime'
     sys.exit(1)
 
-os.system('python mesyparams.py %s %s %s' % (addr, rate, pktsize))
+os.system('python mesyparams.py %s %s' % (addr, rate))
 
 n = [0, 0, 0]
 

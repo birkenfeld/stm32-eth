@@ -27,7 +27,12 @@ use log::{Record, Metadata, LevelFilter, info, warn};
 use stm32_eth::{Eth, RingEntry};
 
 const PORT: u16 = 54321;
+// absolute maximum events that can fit into a single packet
 const MAX_PER_PKT: usize = 234;
+// aimed filling of packets, leaving a bit of room to balance
+const EVENTS_PER_PKT: u32 = 220;
+// maximum interval between packets: 20 ms
+const MAX_INTERVAL: u32 = 200_000;
 
 struct ItmLogger;
 
@@ -321,18 +326,16 @@ impl Generator {
             0xF1F0 => { // generator parameters -- generator specific command
                 let rate = (req_body[1] as u32) << 16 | req_body[0] as u32;
                 if rate == 0 {
-                    self.interval = 400000;
-                }
-                else {
+                    self.interval = 400_000;
+                } else {
                     self.interval = 10_000_000 / rate;
                 }
-                let minpkt = MAX_PER_PKT as u32; // (req_body[2] as u32).min(MAX_PER_PKT);
-                self.pkt_interval = self.interval * minpkt;
-                if self.pkt_interval > 200000 {
-                    self.pkt_interval = 200000;
+                self.pkt_interval = self.interval * EVENTS_PER_PKT;
+                if self.pkt_interval > MAX_INTERVAL {
+                    self.pkt_interval = MAX_INTERVAL;
                 }
-                info!("Configure: set rate to {}/s, min events/packet to {}",
-                      10_000_000 / self.interval, minpkt);
+                info!("Configure: set rate to {}/s, events/packet to {}",
+                      10_000_000 / self.interval, self.pkt_interval / self.interval);
             }
             _ => { // unknown
                 info!("CMD {} not handled...", cmd);
