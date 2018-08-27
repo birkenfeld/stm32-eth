@@ -3,9 +3,8 @@ import socket, sys, struct
 try:
     addr = sys.argv[1]
     rate = int(sys.argv[2])
-    minpkt = int(sys.argv[3])
 except (ValueError, IndexError):
-    print 'usage: mesyparams.py ipaddr rate minperpacket'
+    print 'usage: mesyparams.py ipaddr rate'
 else:
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     ndata = 3  # number of words
@@ -23,7 +22,7 @@ else:
         0,
         0,
         rate,
-        minpkt,
+        0,
     )
     s.sendto(pkt, (addr, 54321))
     s.recvfrom(1024)
