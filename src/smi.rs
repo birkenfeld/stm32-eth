@@ -21,7 +21,7 @@ impl<'a> SMI<'a> {
     }
 
     fn read_data(&self) -> u16 {
-        self.macmiidr.read().td().bits()
+        self.macmiidr.read().md().bits()
     }
 
     /// Read an SMI register
@@ -43,7 +43,7 @@ impl<'a> SMI<'a> {
 
     fn write_data(&self, data: u16) {
         self.macmiidr.write(|w| {
-            unsafe { w.td().bits(data) }
+            unsafe { w.md().bits(data) }
         });
     }
 

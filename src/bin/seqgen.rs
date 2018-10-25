@@ -192,10 +192,10 @@ fn setup_clock(p: &Peripherals) {
     while p.PWR.csr.read().odswrdy().bit_is_clear() {}
 
     // adjust icache and flash wait states
-    p.FLASH.acr.modify(|_, w| unsafe { w.icen().set_bit()
-                                        .dcen().set_bit()
-                                        .prften().set_bit()
-                                        .latency().bits(flash_latency) });
+    p.FLASH.acr.modify(|_, w| w.icen().set_bit()
+                               .dcen().set_bit()
+                               .prften().set_bit()
+                               .latency().bits(flash_latency));
 
     // enable PLL as clock source
     p.RCC.cfgr.write(|w| unsafe { w
@@ -206,9 +206,8 @@ fn setup_clock(p: &Peripherals) {
                                   // AHB prescaler
                                   .hpre().bits(ahb_div)
                                   // PLL selected as system clock
-                                  .sw1().bit(true)
-                                  .sw0().bit(false) });
-    while p.RCC.cfgr.read().sws1().bit_is_clear() {}
+                                  .sw().bits(0b10) });
+    while !p.RCC.cfgr.read().sws().is_pll() {}
 }
 
 fn setup_systick(syst: &mut SYST) {

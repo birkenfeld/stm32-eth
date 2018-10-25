@@ -476,10 +476,10 @@ fn setup_clock(p: &Peripherals) {
     while p.PWR.csr.read().odswrdy().bit_is_clear() {}
 
     // adjust icache and flash wait states
-    p.FLASH.acr.modify(|_, w| unsafe { w.icen().set_bit()
-                                        .dcen().set_bit()
-                                        .prften().set_bit()
-                                        .latency().bits(flash_latency) });
+    p.FLASH.acr.modify(|_, w| w.icen().set_bit()
+                               .dcen().set_bit()
+                               .prften().set_bit()
+                               .latency().bits(flash_latency));
 
     // enable PLL as clock source
     p.RCC.cfgr.write(|w| unsafe { w
@@ -490,9 +490,8 @@ fn setup_clock(p: &Peripherals) {
                                   // AHB prescaler
                                   .hpre().bits(ahb_div)
                                   // PLL selected as system clock
-                                  .sw1().bit(true)
-                                  .sw0().bit(false) });
-    while p.RCC.cfgr.read().sws1().bit_is_clear() {}
+                                  .sw().bits(0b10) });
+    while !p.RCC.cfgr.read().sws().is_pll() {}
 }
 
 fn setup_systick(syst: &mut SYST) {
@@ -504,7 +503,7 @@ fn setup_systick(syst: &mut SYST) {
 
 fn setup_gpio(p: &Peripherals) {
     // Set up button and LEDs, clocks already enabled by ethernet
-    p.GPIOC.moder.modify(|_, w| unsafe { w.moder13().bits(0b00) });
+    p.GPIOC.moder.modify(|_, w| w.moder13().bits(0b00));
     p.GPIOC.pupdr.modify(|_, w| unsafe { w.pupdr13().bits(0b10) });
     p.GPIOB.moder.modify(|_, w| unsafe { w.moder0().bits(0b01).moder7().bits(0b01).moder14().bits(0b01) });
 }
