@@ -57,8 +57,7 @@ impl log::Log for ItmLogger {
 static LOGGER: ItmLogger = ItmLogger;
 static ETH_TIME: Mutex<Cell<i64>> = Mutex::new(Cell::new(0));
 
-entry!(main);
-
+#[entry]
 fn main() -> ! {
     // enable logging if someone is listening on ITM
     if itm().is_fifo_ready() {
@@ -539,20 +538,13 @@ fn read_rand() -> u32 {
     }
 }
 
-exception!(SysTick, systick);
-
-fn systick() {
+#[exception]
+fn SysTick() {
     interrupt::free(|cs| ETH_TIME.borrow(cs).update(|v| v.wrapping_add(1)));
 }
 
-exception!(HardFault, hard_fault);
 
-fn hard_fault(ef: &ExceptionFrame) -> ! {
+#[exception]
+fn HardFault(ef: &ExceptionFrame) -> ! {
     panic!("HardFault at {:#?}", ef);
-}
-
-exception!(*, default_handler);
-
-fn default_handler(irqn: i16) {
-    panic!("Unhandled exception (IRQn = {})", irqn);
 }
