@@ -8,7 +8,7 @@ use cortex_m::{iprintln, interrupt, peripheral};
 use cortex_m::interrupt::Mutex;
 use cortex_m_rt::{entry, exception};
 use stm32f4xx_hal::{
-    gpio::GpioExt,
+    gpio::GpioExt, hal::digital::v2::InputPin,
     stm32::{Peripherals, CorePeripherals, GPIOB, SYST, TIM2, RNG},
 };
 
@@ -67,9 +67,6 @@ fn main() -> ! {
     setup_systick(&mut cp.SYST);
     setup_rng(&p);
     setup_10mhz(&p);
-    setup_gpio(&p);
-    // DHCP if user button pressed
-    let use_dhcp = p.GPIOC.idr.read().idr13().bit_is_set();
     stm32_eth::setup(&p.RCC, &p.SYSCFG);
 
     stm32_eth::setup(&p.RCC, &p.SYSCFG);
@@ -81,6 +78,14 @@ fn main() -> ! {
         gpioa.pa1, gpioa.pa2, gpioa.pa7, gpiob.pb13, gpioc.pc1,
         gpioc.pc4, gpioc.pc5, gpiog.pg11, gpiog.pg13
     );
+
+    // DHCP if user button pressed
+    let dhcp_btn = gpioc.pc13.into_pull_down_input();
+    let use_dhcp = dhcp_btn.is_high().unwrap();
+
+    let _led_green = gpiob.pb0.into_push_pull_output();
+    let _let_blue = gpiob.pb7.into_push_pull_output();
+    let _let_red = gpiob.pb14.into_push_pull_output();
 
     // red LED: indicate "booting"
     set_leds(true, false, false);
@@ -137,10 +142,9 @@ fn main() -> ! {
     let dhcp_rx_buffer = RawSocketBuffer::new(&mut dhcp_rx_meta_buffer[..], &mut dhcp_rx_data_buffer[..]);
     let dhcp_tx_buffer = RawSocketBuffer::new(&mut dhcp_tx_meta_buffer[..], &mut dhcp_tx_data_buffer[..]);
     let mut dhcp = Dhcpv4Client::new(&mut sockets, dhcp_rx_buffer, dhcp_tx_buffer, Instant::from_millis(0));
+    let mut dhcp_msgs = 0;
 
     let udp_handle = sockets.add(udp_socket);
-    // setup is done as soon as we have a static IP or two DHCP msgs (offer/ack)
-    let mut dhcp_msgs = if use_dhcp { 0 } else { 2 };
     let mut cmd_buf = [0; 128];
 
     let mut gen = Generator::new(p.TIM2);
@@ -164,18 +168,19 @@ fn main() -> ! {
         if dhcp_msgs < 2 {
             match dhcp.poll(&mut iface, &mut sockets, time) {
                 Err(e) => warn!("dhcp: {}", e),
-                Ok(Some(config)) => match config.address {
-                    Some(cidr) => {
-                        info!("got {}", cidr);
-                        dhcp_msgs += 1;
-                        iface.update_ip_addrs(
-                            |addrs| addrs.iter_mut().for_each(|addr| *addr = IpCidr::Ipv4(cidr)));
-                        let _ = sockets.get::<UdpSocket>(udp_handle).bind((cidr.address(), 50000));
-                        set_leds(false, true, false);
-                    }
-                    _ => {}
+                Ok(Some(config)) => if let Some(cidr) = config.address {
+                    dhcp_msgs += 1;
+                    iface.update_ip_addrs(|a| *a.first_mut().unwrap() = IpCidr::Ipv4(cidr));
                 },
                 _ => ()
+            }
+            // setup is done as soon as we have a static IP or two DHCP msgs (offer/ack)
+            if dhcp_msgs == 2 || !use_dhcp {
+                let ip_addr = iface.ipv4_addr().unwrap();
+                info!("IP setup done ({}), binding to {}:{}",
+                      if use_dhcp { "dhcp" } else { "static" }, ip_addr, PORT);
+                sockets.get::<UdpSocket>(udp_handle).bind((ip_addr, PORT)).unwrap();
+                set_leds(false, true, false);
             }
         }
     }
@@ -506,14 +511,6 @@ fn setup_systick(syst: &mut SYST) {
     syst.set_reload(SYST::get_ticks_per_10ms() / 10);
     syst.enable_counter();
     syst.enable_interrupt();
-}
-
-fn setup_gpio(p: &Peripherals) {
-    // Set up button and LEDs, clocks already enabled by ethernet
-    // TODO use HAL
-    p.GPIOC.moder.modify(|_, w| w.moder13().bits(0b00));
-    p.GPIOC.pupdr.modify(|_, w| unsafe { w.pupdr13().bits(0b10) });
-    p.GPIOB.moder.modify(|_, w| w.moder0().bits(0b01).moder7().bits(0b01).moder14().bits(0b01));
 }
 
 fn set_leds(red: bool, green: bool, blue: bool) {
