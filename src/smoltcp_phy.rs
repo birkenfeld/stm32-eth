@@ -1,7 +1,7 @@
 use core::intrinsics::transmute;
 use smoltcp::Error;
 use smoltcp::time::Instant;
-use smoltcp::phy::{DeviceCapabilities, ChecksumCapabilities,
+use smoltcp::phy::{DeviceCapabilities, ChecksumCapabilities, Checksum,
                    Device, RxToken, TxToken};
 use crate::{Eth, rx::RxPacket, tx::TxError};
 
@@ -12,10 +12,10 @@ impl<'a, 'rx, 'tx, 'b> Device<'a> for &'b mut Eth<'rx, 'tx> {
     type TxToken = EthTxToken<'a>;
 
     fn capabilities(&self) -> DeviceCapabilities {
-        let checksum = ChecksumCapabilities::default();
-        // checksum.ipv4 = Checksum::Tx;
-        // checksum.udp = Checksum::Tx;
-        // checksum.tcp = Checksum::Tx;
+        let mut checksum = ChecksumCapabilities::default();
+        checksum.ipv4 = Checksum::Tx;
+        checksum.udp = Checksum::Tx;
+        checksum.tcp = Checksum::Tx;
         let mut capabilities = DeviceCapabilities::default();
         capabilities.max_transmission_unit = 1500;
         capabilities.checksum = checksum;

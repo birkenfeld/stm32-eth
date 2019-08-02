@@ -142,7 +142,6 @@ fn main() -> ! {
     let dhcp_rx_buffer = RawSocketBuffer::new(&mut dhcp_rx_meta_buffer[..], &mut dhcp_rx_data_buffer[..]);
     let dhcp_tx_buffer = RawSocketBuffer::new(&mut dhcp_tx_meta_buffer[..], &mut dhcp_tx_data_buffer[..]);
     let mut dhcp = Dhcpv4Client::new(&mut sockets, dhcp_rx_buffer, dhcp_tx_buffer, Instant::from_millis(0));
-    let mut dhcp_msgs = 0;
 
     let udp_handle = sockets.add(udp_socket);
     let mut cmd_buf = [0; 128];
@@ -150,6 +149,38 @@ fn main() -> ! {
     let mut gen = Generator::new(p.TIM2);
 
     info!("------------------------------------------------------------------------");
+
+    if use_dhcp {
+        // give the remote partner time to realize the link is up,
+        // so we don't run into the 10sec DHCP discover interval
+        while interrupt::free(|cs| ETH_TIME.borrow(cs).get()) < 2000 { }
+
+        let mut got_offer = false;
+        loop {
+            let time = Instant::from_millis(interrupt::free(|cs| ETH_TIME.borrow(cs).get()));
+            if let Err(e) = iface.poll(&mut sockets, time) {
+                warn!("poll: {}", e);
+            }
+            match dhcp.poll(&mut iface, &mut sockets, time) {
+                Err(e) => warn!("dhcp: {}", e),
+                Ok(Some(config)) => if let Some(cidr) = config.address {
+                    iface.update_ip_addrs(|a| *a.first_mut().unwrap() = cidr.into());
+                    if got_offer {
+                        break;
+                    }
+                    got_offer = true;
+                },
+                _ => ()
+            }
+        }
+    }
+
+    let ip_addr = iface.ipv4_addr().unwrap();
+    info!("IP setup done ({}), binding to {}:{}",
+          if use_dhcp { "dhcp" } else { "static" }, ip_addr, PORT);
+    sockets.get::<UdpSocket>(udp_handle).bind((ip_addr, PORT)).unwrap();
+    set_leds(false, true, false);
+
     loop {
         // process packets
         {
@@ -163,25 +194,6 @@ fn main() -> ! {
         let time = Instant::from_millis(interrupt::free(|cs| ETH_TIME.borrow(cs).get()));
         if let Err(e) = iface.poll(&mut sockets, time) {
             warn!("poll: {}", e);
-        }
-        // ethernet setup
-        if dhcp_msgs < 2 {
-            match dhcp.poll(&mut iface, &mut sockets, time) {
-                Err(e) => warn!("dhcp: {}", e),
-                Ok(Some(config)) => if let Some(cidr) = config.address {
-                    dhcp_msgs += 1;
-                    iface.update_ip_addrs(|a| *a.first_mut().unwrap() = IpCidr::Ipv4(cidr));
-                },
-                _ => ()
-            }
-            // setup is done as soon as we have a static IP or two DHCP msgs (offer/ack)
-            if dhcp_msgs == 2 || !use_dhcp {
-                let ip_addr = iface.ipv4_addr().unwrap();
-                info!("IP setup done ({}), binding to {}:{}",
-                      if use_dhcp { "dhcp" } else { "static" }, ip_addr, PORT);
-                sockets.get::<UdpSocket>(udp_handle).bind((ip_addr, PORT)).unwrap();
-                set_leds(false, true, false);
-            }
         }
     }
 }
@@ -508,7 +520,7 @@ fn setup_clock(p: &Peripherals) {
 
 fn setup_systick(syst: &mut SYST) {
     // systick is used for advancing the Ethernet clock for timeouts etc.
-    syst.set_reload(SYST::get_ticks_per_10ms() / 10);
+    syst.set_reload(22_500 - 1); // every ms
     syst.enable_counter();
     syst.enable_interrupt();
 }
