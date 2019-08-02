@@ -14,7 +14,7 @@ except:
 
 os.system('python mesyparams.py %s %s' % (addr, rate))
 
-n = [0, 0, 0]
+n = [0, 0, 0, 0]
 
 s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 s.bind(('', 54321))
@@ -31,6 +31,7 @@ def get():
         n[0] += 1
         blen = ord(d[0]) | (ord(d[1]) << 8)
         n[1] += (blen - 21) / 3
+        n[3] += len(d) + 66  # Eth/IP/UDP headers
 
 t = threading.Thread(target=get)
 t.setDaemon(True)
@@ -38,5 +39,6 @@ t.start()
 time.sleep(dt)
 s.sendto('\x00\x00\x00\x01' + '\x00' * 16, (addr, 54321))
 t.join()
-print 'got: %s packets with %s events => %.0f ev/s [set: %.0f], %.0f ev/pkt' % \
-    (n[0], n[1], n[1]/(n[2] / 1e7), 10000000//(10000000//rate), n[1]/float(n[0]))
+print(n)
+print 'got: %s packets with %s events => %.0f ev/s [set: %.0f], %.0f ev/pkt, %.2f MB/s' % \
+    (n[0], n[1], n[1]/(n[2] / 1e7), 10000000//(10000000//rate), n[1]/float(n[0]), (n[3])/float(n[2] / 10.))
