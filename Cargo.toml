@@ -22,7 +22,7 @@ volatile-register = "0.2"
 aligned = "0.3"
 stm32f4xx-hal = "0.5"
 
-smoltcp = { git = "https://github.com/m-labs/smoltcp", default-features = false, features = ["proto-ipv4", "socket-icmp", "socket-udp", "socket-tcp"], optional = true }
+smoltcp = { git = "https://github.com/m-labs/smoltcp", default-features = false, features = ["proto-ipv4", "socket-icmp", "socket-udp", "socket-tcp", "ethernet"], optional = true }
 log = { version = "0.4", optional = true }
 
 [features]
